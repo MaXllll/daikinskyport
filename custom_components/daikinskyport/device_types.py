@@ -94,11 +94,22 @@ def is_deneb_payload(thermostat: dict) -> bool:
 
 
 def log_skipped_device(thermostat: dict, platform: str) -> None:
-    """Log once-per-setup that a non-One+ device was skipped by a platform."""
+    """Log that a non-One+ device was skipped by a One+-only platform.
+
+    Known ductless (DENEB) devices are expected to be skipped by One+
+    platforms (weather/switch) — that's routine, so log at debug to avoid
+    warning spam on every reload. Truly unknown shapes stay at warning.
+    """
+    if is_deneb_payload(thermostat):
+        _LOGGER.debug(
+            "Device '%s' is a ductless head; the %s platform is One+-only.",
+            thermostat.get("adptDeviceName") or thermostat.get("name", "<unnamed>"),
+            platform,
+        )
+        return
     _LOGGER.warning(
-        "Skipping device '%s' (model: %s) for %s: not a Daikin One+ "
-        "thermostat payload. If this is a ductless/mini-split unit, "
-        "support is in progress; this device will not crash setup anymore.",
+        "Skipping device '%s' (model: %s) for %s: unrecognized device "
+        "payload. Setup continues without it.",
         thermostat.get("name", "<unnamed>"),
         thermostat.get("model", "<unknown>"),
         platform,

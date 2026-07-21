@@ -11,6 +11,7 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
 from .const import DAIKIN_PERCENT_MULTIPLIER
+from .device_types import is_deneb_payload
 
 logger = logging.getLogger('daikinskyport')
 
@@ -52,6 +53,8 @@ class DaikinSkyport(object):
         self.thermostatlist = list()
         self.authenticated = False
         self.skip_next = False
+        # Per-device data freshness: device id -> True/False after each poll.
+        self.update_status = dict()
 
         if config is None:
             self.file_based_config = True
@@ -158,8 +161,12 @@ class DaikinSkyport(object):
                 overwrite = False
                 thermostat_info = self.get_thermostat_info(thermostat['id'])
                 if thermostat_info == None:
+                    # Device offline/unreachable: keep stale data but flag it
+                    # so entities can report themselves unavailable.
+                    self.update_status[thermostat['id']] = False
                     continue
-                
+                self.update_status[thermostat['id']] = True
+
                 thermostat_info['name'] = thermostat['name']
                 thermostat_info['id'] = thermostat['id']
                 thermostat_info['model'] = thermostat['model']
@@ -223,6 +230,14 @@ class DaikinSkyport(object):
         ''' Return a single thermostat based on index '''
         return self.thermostats[index]
 
+    def is_device_available(self, index):
+        ''' True when the device's data was refreshed on the last poll. '''
+        try:
+            device_id = self.thermostats[index]['id']
+        except (IndexError, KeyError, TypeError):
+            return False
+        return self.update_status.get(device_id, True)
+
     def get_sensors(self, index):
         ''' Return sensors based on index '''
         sensors = list()
@@ -230,15 +245,23 @@ class DaikinSkyport(object):
         name = thermostat['name']
 
         # DENEB (Aurora ductless) payloads have their own field names.
-        if "iduRoomTemp" in thermostat:
+        if is_deneb_payload(thermostat):
             name = thermostat.get("adptDeviceName") or name
             sensors.append({"name": f"{name} Indoor", "value": thermostat["iduRoomTemp"], "type": "temperature"})
             if "iduRoomHum" in thermostat:
                 sensors.append({"name": f"{name} Indoor", "value": thermostat["iduRoomHum"], "type": "humidity"})
-            if "oduOutdoorTemp" in thermostat:
-                sensors.append({"name": f"{name} Outdoor", "value": thermostat["oduOutdoorTemp"], "type": "temperature"})
-            if "oduConsumedPower" in thermostat:
-                sensors.append({"name": f"{name} Outdoor", "value": thermostat["oduConsumedPower"], "type": "power"})
+            # The odu* readings come from the SHARED outdoor unit; emit them
+            # only for the first ductless head to avoid 4x duplicate sensors
+            # (and quadruple-counted power in the Energy dashboard).
+            first_deneb = next(
+                (i for i, t in enumerate(self.thermostats) if is_deneb_payload(t)),
+                None,
+            )
+            if index == first_deneb:
+                if "oduOutdoorTemp" in thermostat:
+                    sensors.append({"name": f"{name} Outdoor", "value": thermostat["oduOutdoorTemp"], "type": "temperature"})
+                if "oduConsumedPower" in thermostat:
+                    sensors.append({"name": f"{name} Outdoor", "value": thermostat["oduConsumedPower"], "type": "power"})
             return sensors
 
         # Fields below are conditional: ductless (Aurora mini-split) payloads
@@ -343,7 +366,6 @@ class DaikinSkyport(object):
         return result
 
     def make_request(self, index, body, log_msg_action, *, retry_count=0):
-        self.skip_next = True
         deviceID = self.thermostats[index]['id']
         url = 'https://api.daikinskyport.com/deviceData/' + deviceID
         header = {'Content-Type': 'application/json;charset=UTF-8',
@@ -361,6 +383,9 @@ class DaikinSkyport(object):
             logger.warn("Error connecting to Daikin Skyport.  Possible connectivity outage: %s", e)
             return None
         if request.status_code == requests.codes.ok:
+            # Only skip the next poll when the write actually succeeded;
+            # a failed write must not suppress fresh (truthful) data.
+            self.skip_next = True
             return request
         elif (request.status_code == 401 and retry_count == 0 and
               request.json()['error'] == 'authorization_expired'):
@@ -376,34 +401,43 @@ class DaikinSkyport(object):
     # ---- DENEB (Aurora ductless) commands: direct field writes, verified live ----
 
     def set_deneb_power(self, index, power):
-        ''' Power a DENEB ductless head on/off (iduOnOff). '''
+        ''' Power a DENEB ductless head on/off (iduOnOff).
+        Local state is updated only after a confirmed write. '''
         power = bool(power)
-        body = {"iduOnOff": power}
-        self.thermostats[index]["iduOnOff"] = power
-        return self.make_request(index, body, "set ductless power")
+        result = self.make_request(index, {"iduOnOff": power},
+                                   "set ductless power")
+        if result is not None:
+            self.thermostats[index]["iduOnOff"] = power
+        return result
 
     def set_deneb_mode(self, index, mode):
         ''' Set operating mode on a DENEB head, powering it on.
         Valid modes: 0=fan_only, 1=heat, 2=cool, 3=auto, 5=dry. '''
-        body = {"iduOnOff": True, "iduOperatingMode": mode}
-        self.thermostats[index]["iduOnOff"] = True
-        self.thermostats[index]["iduOperatingMode"] = mode
-        return self.make_request(index, body, "set ductless mode")
+        result = self.make_request(index,
+                                   {"iduOnOff": True, "iduOperatingMode": mode},
+                                   "set ductless mode")
+        if result is not None:
+            self.thermostats[index]["iduOnOff"] = True
+            self.thermostats[index]["iduOperatingMode"] = mode
+        return result
 
     def set_deneb_setpoint(self, index, field, temperature):
         ''' Write a per-mode setpoint field (iduHeatSetpoint/iduCoolSetpoint/
         iduAutoSetpoint) on a DENEB head, rounded to 0.5 C. '''
         temperature = round(temperature * 2) / 2
-        body = {field: temperature}
-        self.thermostats[index][field] = temperature
-        return self.make_request(index, body, "set ductless setpoint")
+        result = self.make_request(index, {field: temperature},
+                                   "set ductless setpoint")
+        if result is not None:
+            self.thermostats[index][field] = temperature
+        return result
 
     def set_deneb_fan(self, index, field, speed):
         ''' Write a per-mode fan-speed field on a DENEB head.
         Values: 3..7 = speeds 1..5, 10 = auto, 11 = quiet. '''
-        body = {field: speed}
-        self.thermostats[index][field] = speed
-        return self.make_request(index, body, "set ductless fan")
+        result = self.make_request(index, {field: speed}, "set ductless fan")
+        if result is not None:
+            self.thermostats[index][field] = speed
+        return result
 
     def set_hvac_mode(self, index, hvac_mode):
         ''' possible modes are DAIKIN_HVAC_MODE_{OFF,HEAT,COOL,AUTO,AUXHEAT} '''

@@ -42,16 +42,21 @@ def deneb_entity(deneb_payload):
     from custom_components.daikinskyport.climate_deneb import DaikinDenebClimate
 
     client = MagicMock()
+    payload = dict(deneb_payload)
+    client.thermostats = [payload]
     data = make_fake_coordinator(client)
-    entity = DaikinDenebClimate(data, 0, dict(deneb_payload))
+    entity = DaikinDenebClimate(data, 0, payload)
     return entity, client
 
 
 class TestStateMapping:
-    def test_identity_uses_friendly_adapter_name(self, deneb_entity):
+    def test_identity_uses_cleaned_adapter_name_on_device(self, deneb_entity):
         entity, _ = deneb_entity
         assert entity.unique_id == "dddddddd-0000-0000-0000-000000000004-climate"
-        assert entity.name == "Heatpump_Bedroom2"
+        # has_entity_name convention: entity name None, device carries the
+        # cleaned (underscore-free) adapter name.
+        assert entity._attr_has_entity_name is True
+        assert entity.device_info["name"] == "Heatpump Bedroom2"
 
     def test_on_cool_maps_to_cool_mode(self, deneb_entity):
         entity, _ = deneb_entity
@@ -102,7 +107,9 @@ class TestStateMapping:
 
         payload = dict(deneb_payload)
         payload["iduOnOff"] = False
-        entity = DaikinDenebClimate(make_fake_coordinator(MagicMock()), 0, payload)
+        client = MagicMock()
+        client.thermostats = [payload]
+        entity = DaikinDenebClimate(make_fake_coordinator(client), 0, payload)
         assert entity.hvac_mode == HVACMode.OFF
         assert entity.hvac_action == HVACAction.OFF
         # target still shown from last active mode so the card is useful
@@ -197,6 +204,147 @@ class TestClientDenebCommands:
         assert by_key[("Heatpump_Bedroom2 Indoor", "temperature")] == 22
         assert by_key[("Heatpump_Bedroom2 Indoor", "humidity")] == 60
         assert by_key[("Heatpump_Bedroom2 Outdoor", "temperature")] == 21.5
+
+
+class TestSafetyGuards:
+    """Review-driven guards: multi-zone conflicts, clamping, honesty, availability."""
+
+    def _make_two_heads(self, deneb_payload, own_mode=2, other_on=True, other_mode=2):
+        from custom_components.daikinskyport.climate_deneb import DaikinDenebClimate
+
+        other = dict(deneb_payload)
+        other["id"] = "dddddddd-0000-0000-0000-000000000001"
+        other["adptDeviceName"] = "Heatpump_LivingRoom"
+        other["iduOnOff"] = other_on
+        other["iduOperatingMode"] = other_mode
+        own = dict(deneb_payload)
+        own["iduOnOff"] = False
+        own["iduOperatingMode"] = own_mode
+        client = MagicMock()
+        client.thermostats = [other, own]
+        entity = DaikinDenebClimate(make_fake_coordinator(client), 1, own)
+        return entity, client
+
+    def test_heat_blocked_while_other_head_cools(self, deneb_payload):
+        from homeassistant.exceptions import ServiceValidationError
+        from homeassistant.components.climate import HVACMode
+
+        entity, client = self._make_two_heads(deneb_payload, other_mode=2)  # other cooling
+        with pytest.raises(ServiceValidationError):
+            entity.set_hvac_mode(HVACMode.HEAT)
+        client.set_deneb_mode.assert_not_called()
+
+    def test_cool_blocked_while_other_head_heats(self, deneb_payload):
+        from homeassistant.exceptions import ServiceValidationError
+        from homeassistant.components.climate import HVACMode
+
+        entity, client = self._make_two_heads(deneb_payload, other_mode=1)  # other heating
+        with pytest.raises(ServiceValidationError):
+            entity.set_hvac_mode(HVACMode.COOL)
+
+    def test_no_conflict_when_other_head_off(self, deneb_payload):
+        from homeassistant.components.climate import HVACMode
+
+        entity, client = self._make_two_heads(deneb_payload, other_on=False, other_mode=2)
+        entity.set_hvac_mode(HVACMode.HEAT)  # must not raise
+        client.set_deneb_mode.assert_called_once_with(1, 1)
+
+    def test_fan_only_never_conflicts(self, deneb_payload):
+        from homeassistant.components.climate import HVACMode
+
+        entity, client = self._make_two_heads(deneb_payload, other_mode=1)  # other heating
+        entity.set_hvac_mode(HVACMode.FAN_ONLY)  # airflow only: allowed
+        client.set_deneb_mode.assert_called_once_with(1, 0)
+
+    def test_setpoint_out_of_bounds_rejected(self, deneb_entity):
+        from homeassistant.exceptions import ServiceValidationError
+
+        entity, client = deneb_entity
+        with pytest.raises(ServiceValidationError):
+            entity.set_temperature(temperature=40)
+        with pytest.raises(ServiceValidationError):
+            entity.set_temperature(temperature=5)
+        client.set_deneb_setpoint.assert_not_called()
+
+    def test_failed_command_raises_and_keeps_state(self, deneb_entity):
+        from homeassistant.exceptions import HomeAssistantError
+
+        entity, client = deneb_entity
+        client.set_deneb_power.return_value = None  # make_request failure
+        with pytest.raises(HomeAssistantError):
+            entity.turn_off()
+        # optimistic state NOT applied on failure
+        assert entity.thermostat["iduOnOff"] is True
+
+    def test_unavailable_when_device_offline(self, deneb_entity):
+        entity, client = deneb_entity
+        client.is_device_available.return_value = False
+        assert entity.available is False
+        client.is_device_available.return_value = True
+        assert entity.available is True
+
+    def test_diagnostic_attributes_exposed(self, deneb_entity):
+        entity, _ = deneb_entity
+        attrs = entity.extra_state_attributes
+        assert attrs["mode_refusal"] is False
+        assert attrs["defrosting"] is False
+
+
+class TestClientRobustness:
+    def test_deneb_write_mutates_only_after_success(
+        self, skyport_client, mock_skyport_api, deneb_payload
+    ):
+        from tests.conftest import API, DEVICES_URL
+        import json
+        from pathlib import Path
+
+        devices = json.loads(
+            (Path(__file__).parent / "fixtures" / "devices_deneb.json").read_text()
+        )[:1]
+        payload = {k: v for k, v in deneb_payload.items() if k not in ("id", "name", "model")}
+        mock_skyport_api.get(DEVICES_URL, json=devices)
+        mock_skyport_api.get(f"{API}/deviceData/{devices[0]['id']}", json=payload)
+        mock_skyport_api.put(
+            f"{API}/deviceData/{devices[0]['id']}",
+            status_code=500,
+            json={"error": "boom"},
+        )
+        skyport_client.request_tokens()
+        skyport_client.update()
+
+        before = skyport_client.thermostats[0]["iduOnOff"]
+        result = skyport_client.set_deneb_power(0, not before)
+
+        assert result is None
+        assert skyport_client.thermostats[0]["iduOnOff"] == before  # unchanged
+        assert skyport_client.skip_next is False  # failed write must not skip polls
+
+    def test_offline_device_marked_unavailable(
+        self, skyport_client, mock_skyport_api, deneb_payload
+    ):
+        from tests.conftest import API, DEVICES_URL
+        import json
+        from pathlib import Path
+
+        devices = json.loads(
+            (Path(__file__).parent / "fixtures" / "devices_deneb.json").read_text()
+        )[:1]
+        payload = {k: v for k, v in deneb_payload.items() if k not in ("id", "name", "model")}
+        mock_skyport_api.get(DEVICES_URL, json=devices)
+        device_url = f"{API}/deviceData/{devices[0]['id']}"
+        mock_skyport_api.get(device_url, json=payload)
+        skyport_client.request_tokens()
+        skyport_client.update()
+        assert skyport_client.is_device_available(0) is True
+
+        # Device goes offline: API answers 400 DeviceOfflineException
+        mock_skyport_api.get(
+            device_url, status_code=400, json={"message": "DeviceOfflineException"}
+        )
+        skyport_client.update()
+        assert skyport_client.is_device_available(0) is False
+        # stale data retained (so HA can show last-known values as unavailable)
+        assert skyport_client.thermostats[0]["iduRoomTemp"] == 22
 
 
 class TestRouting:

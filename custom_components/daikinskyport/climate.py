@@ -245,18 +245,24 @@ async def async_setup_entry(
 
     data = hass.data[DOMAIN][entry.entry_id]
     coordinator: DaikinSkyportData = data[COORDINATOR]
+
+    # NOTE: the custom services below (resume_program, fan schedule, night
+    # mode, ...) are One+-thermostat features. They must only ever iterate
+    # One+ entities; a DENEB (ductless) entity has none of those methods.
     entities = []
 
     for index, thermostat in iter_oneplus_thermostats(coordinator.daikinskyport):
         entities.append(Thermostat(coordinator, index, thermostat))
 
-    # DENEB (Aurora ductless) heads get their own entity class.
+    # DENEB (Aurora ductless) heads get their own entity class, kept out of
+    # the One+ service target list on purpose.
+    deneb_entities = []
     for index in range(len(coordinator.daikinskyport.thermostats)):
         thermostat = coordinator.daikinskyport.get_thermostat(index)
         if not is_oneplus_payload(thermostat) and is_deneb_payload(thermostat):
-            entities.append(DaikinDenebClimate(coordinator, index, thermostat))
+            deneb_entities.append(DaikinDenebClimate(coordinator, index, thermostat))
 
-    async_add_entities(entities, True)
+    async_add_entities(entities + deneb_entities, True)
 
     def resume_program_set_service(service: ServiceCall) -> None:
         """Resume the schedule on the target thermostats."""

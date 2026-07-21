@@ -25,8 +25,10 @@ from . import DaikinSkyportData
 from .const import (
     _LOGGER,
     DOMAIN,
+    MANUFACTURER,
     COORDINATOR,
 )
+from .device_types import is_deneb_payload
 
 DEVICE_CLASS_DEMAND = "demand"
 DEVICE_CLASS_FAULT_CODE = "Code"
@@ -160,10 +162,25 @@ class DaikinSkyportSensor(SensorEntity):
         self._state = None
         self._native_unit_of_measurement = SENSOR_TYPES[sensor_type]["native_unit_of_measurement"]
         self._attr_state_class = SENSOR_TYPES[sensor_type]['state_class']
+        # DENEB (ductless) sensors belong to their head's device, not the
+        # account umbrella device, so rooms/areas group correctly.
+        thermostat = data.daikinskyport.thermostats[sensor_index]
+        if is_deneb_payload(thermostat):
+            device_name = (thermostat.get("adptDeviceName") or thermostat.get("name") or "")
+            self._head_device_info = DeviceInfo(
+                identifiers={(DOMAIN, thermostat["id"])},
+                manufacturer=MANUFACTURER,
+                model="Aurora ductless (DENEB)",
+                name=" ".join(str(device_name).replace("_", " ").split()) or None,
+            )
+        else:
+            self._head_device_info = None
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return device information for this Daikin Skyport thermostat."""
+        """Return device information for this Daikin Skyport sensor."""
+        if self._head_device_info is not None:
+            return self._head_device_info
         return self.data.device_info
 
     @property
