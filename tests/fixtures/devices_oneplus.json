@@ -1,0 +1,12 @@
+[
+  {
+    "id": "0000aaaa-1111-2222-3333-444455556666",
+    "locationId": "9999ffff-8888-7777-6666-555544443333",
+    "name": "Main Floor",
+    "model": "ONEPLUS",
+    "firmwareVersion": "3.2.15",
+    "createdDate": 1747526400,
+    "hasOwner": true,
+    "hasWrite": true
+  }
+]

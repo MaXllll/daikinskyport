@@ -1,0 +1,46 @@
+[
+ {
+  "brand": "DB",
+  "createdDate": 1750000000,
+  "firmwareVersion": "3_2_0",
+  "hasOwner": "<redacted>",
+  "hasWrite": true,
+  "id": "dddddddd-0000-0000-0000-000000000001",
+  "locationId": "<redacted>",
+  "model": "DENEB",
+  "name": "DaikinAP00001"
+ },
+ {
+  "brand": "DB",
+  "createdDate": 1750000100,
+  "firmwareVersion": "3_2_0",
+  "hasOwner": "<redacted>",
+  "hasWrite": true,
+  "id": "dddddddd-0000-0000-0000-000000000002",
+  "locationId": "<redacted>",
+  "model": "DENEB",
+  "name": "DaikinAP00002"
+ },
+ {
+  "brand": "DB",
+  "createdDate": 1750000200,
+  "firmwareVersion": "3_2_0",
+  "hasOwner": "<redacted>",
+  "hasWrite": true,
+  "id": "dddddddd-0000-0000-0000-000000000003",
+  "locationId": "<redacted>",
+  "model": "DENEB",
+  "name": "DaikinAP00003"
+ },
+ {
+  "brand": "DB",
+  "createdDate": 1750000300,
+  "firmwareVersion": "3_2_0",
+  "hasOwner": "<redacted>",
+  "hasWrite": true,
+  "id": "dddddddd-0000-0000-0000-000000000004",
+  "locationId": "<redacted>",
+  "model": "DENEB",
+  "name": "DaikinAP00004"
+ }
+]

@@ -58,6 +58,36 @@ DAIKIN_HVAC_MODE_COOL = 2
 DAIKIN_HVAC_MODE_AUTO = 3
 DAIKIN_HVAC_MODE_AUXHEAT = 4
 
+# --- DENEB (North American Aurora ductless mini-split) constants ---
+# Physically verified on a live Aurora multi-zone ductless system:
+# values 4 and 6 are rejected by the unit. Power is a separate flag
+# (iduOnOff); the mode field retains its last value while off.
+DENEB_MODE_FAN_ONLY = 0
+DENEB_MODE_HEAT = 1
+DENEB_MODE_COOL = 2
+DENEB_MODE_AUTO = 3
+DENEB_MODE_DRY = 5
+
+# Fan speed encoding: 3..7 = speeds 1..5, 10 = auto, 11 = quiet/night
+DENEB_FAN_AUTO = 10
+DENEB_FAN_QUIET = 11
+DENEB_FAN_MIN = 3
+DENEB_FAN_MAX = 7
+
+# Per-mode field names in the deviceData payload
+DENEB_MODE_SETPOINT_FIELD = {
+    DENEB_MODE_HEAT: "iduHeatSetpoint",
+    DENEB_MODE_COOL: "iduCoolSetpoint",
+    DENEB_MODE_AUTO: "iduAutoSetpoint",
+}
+DENEB_MODE_FAN_FIELD = {
+    DENEB_MODE_FAN_ONLY: "iduFanModeFanSpeed",
+    DENEB_MODE_HEAT: "iduHeatFanSpeed",
+    DENEB_MODE_COOL: "iduCoolFanSpeed",
+    DENEB_MODE_AUTO: "iduAutoFanSpeed",
+    DENEB_MODE_DRY: "iduDryFanSpeed",
+}
+
 CONF_REFRESH_TOKEN = "refresh_token"
 CONF_ACCESS_TOKEN = "access_token"
 

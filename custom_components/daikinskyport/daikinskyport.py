@@ -228,8 +228,25 @@ class DaikinSkyport(object):
         sensors = list()
         thermostat = self.thermostats[index]
         name = thermostat['name']
-        sensors.append({"name": f"{name} Outdoor", "value": thermostat['tempOutdoor'], "type": "temperature"})
-        sensors.append({"name": f"{name} Outdoor", "value": thermostat['humOutdoor'], "type": "humidity"})
+
+        # DENEB (Aurora ductless) payloads have their own field names.
+        if "iduRoomTemp" in thermostat:
+            name = thermostat.get("adptDeviceName") or name
+            sensors.append({"name": f"{name} Indoor", "value": thermostat["iduRoomTemp"], "type": "temperature"})
+            if "iduRoomHum" in thermostat:
+                sensors.append({"name": f"{name} Indoor", "value": thermostat["iduRoomHum"], "type": "humidity"})
+            if "oduOutdoorTemp" in thermostat:
+                sensors.append({"name": f"{name} Outdoor", "value": thermostat["oduOutdoorTemp"], "type": "temperature"})
+            if "oduConsumedPower" in thermostat:
+                sensors.append({"name": f"{name} Outdoor", "value": thermostat["oduConsumedPower"], "type": "power"})
+            return sensors
+
+        # Fields below are conditional: ductless (Aurora mini-split) payloads
+        # do not carry the One+ thermostat's outdoor/equipment fields.
+        if "tempOutdoor" in thermostat:
+            sensors.append({"name": f"{name} Outdoor", "value": thermostat['tempOutdoor'], "type": "temperature"})
+        if "humOutdoor" in thermostat:
+            sensors.append({"name": f"{name} Outdoor", "value": thermostat['humOutdoor'], "type": "humidity"})
         if "ctOutdoorFanRequestedDemandPercentage" in thermostat:
             sensors.append({"name": f"{name} Outdoor fan", "value": round(thermostat['ctOutdoorFanRequestedDemandPercentage'] / DAIKIN_PERCENT_MULTIPLIER, 1), "type": "demand"})
         if "ctOutdoorHeatRequestedDemand" in thermostat:
@@ -268,17 +285,17 @@ class DaikinSkyport(object):
             sensors.append({"name": f"{name} Indoor air handler blower", "value": thermostat['ctAHCurrentIndoorAirflow'], "type": "airflow"})
 
         ''' if equipment is idle, set power to zero rather than accept bogus data '''
-        if thermostat['equipmentStatus'] == 5:
+        if thermostat.get('equipmentStatus') == 5:
             sensors.append({"name": f"{name} Indoor", "value": 0, "type": "power"})
         elif "ctIndoorPower" in thermostat:
             sensors.append({"name": f"{name} Indoor", "value": thermostat['ctIndoorPower'], "type": "power"})
 
 
-        if self.thermostats[index]['aqOutdoorAvailable']:
+        if self.thermostats[index].get('aqOutdoorAvailable', False):
             sensors.append({"name": f"{name} Outdoor", "value": thermostat['aqOutdoorParticles'], "type": "particle"})
             sensors.append({"name": f"{name} Outdoor", "value": thermostat['aqOutdoorValue'], "type": "score"})
             sensors.append({"name": f"{name} Outdoor", "value": round(thermostat['aqOutdoorOzone'] * 1.96), "type": "ozone"})
-        if self.thermostats[index]['aqIndoorAvailable']:
+        if self.thermostats[index].get('aqIndoorAvailable', False):
             sensors.append({"name": f"{name} Indoor", "value": thermostat['aqIndoorParticlesValue'], "type": "particle"})
             sensors.append({"name": f"{name} Indoor", "value": thermostat['aqIndoorValue'], "type": "score"})
             sensors.append({"name": f"{name} Indoor", "value": thermostat['aqIndoorVOCValue'], "type": "VOC"})
@@ -355,6 +372,38 @@ class DaikinSkyport(object):
                 "Error fetching data from Daikin Skyport while attempting to %s: %s",
                 log_msg_action, request.json())
             return None
+
+    # ---- DENEB (Aurora ductless) commands: direct field writes, verified live ----
+
+    def set_deneb_power(self, index, power):
+        ''' Power a DENEB ductless head on/off (iduOnOff). '''
+        power = bool(power)
+        body = {"iduOnOff": power}
+        self.thermostats[index]["iduOnOff"] = power
+        return self.make_request(index, body, "set ductless power")
+
+    def set_deneb_mode(self, index, mode):
+        ''' Set operating mode on a DENEB head, powering it on.
+        Valid modes: 0=fan_only, 1=heat, 2=cool, 3=auto, 5=dry. '''
+        body = {"iduOnOff": True, "iduOperatingMode": mode}
+        self.thermostats[index]["iduOnOff"] = True
+        self.thermostats[index]["iduOperatingMode"] = mode
+        return self.make_request(index, body, "set ductless mode")
+
+    def set_deneb_setpoint(self, index, field, temperature):
+        ''' Write a per-mode setpoint field (iduHeatSetpoint/iduCoolSetpoint/
+        iduAutoSetpoint) on a DENEB head, rounded to 0.5 C. '''
+        temperature = round(temperature * 2) / 2
+        body = {field: temperature}
+        self.thermostats[index][field] = temperature
+        return self.make_request(index, body, "set ductless setpoint")
+
+    def set_deneb_fan(self, index, field, speed):
+        ''' Write a per-mode fan-speed field on a DENEB head.
+        Values: 3..7 = speeds 1..5, 10 = auto, 11 = quiet. '''
+        body = {field: speed}
+        self.thermostats[index][field] = speed
+        return self.make_request(index, body, "set ductless fan")
 
     def set_hvac_mode(self, index, hvac_mode):
         ''' possible modes are DAIKIN_HVAC_MODE_{OFF,HEAT,COOL,AUTO,AUXHEAT} '''

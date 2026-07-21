@@ -7,6 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from .device_types import is_oneplus_payload, log_skipped_device
 
 
 from .const import (
@@ -28,6 +29,9 @@ async def async_setup_entry(
 
     for index in range(len(coordinator.daikinskyport.thermostats)):
         thermostat = coordinator.daikinskyport.get_thermostat(index)
+        if not is_oneplus_payload(thermostat):
+            log_skipped_device(thermostat, "switch")
+            continue
         async_add_entities([DaikinSkyportAuxHeat(coordinator, thermostat["name"], index)], True)
 
 class DaikinSkyportAuxHeat(SwitchEntity):

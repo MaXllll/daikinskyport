@@ -1,0 +1,29 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pinned:
+    name: "pytest (pinned harness / HA 2024.3)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements_test.txt
+      - run: pytest
+
+  latest:
+    name: "pytest (latest harness / current HA)"
+    runs-on: ubuntu-latest
+    continue-on-error: true # informational: catches upcoming HA breakage early
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pytest-homeassistant-custom-component requests-mock
+      - run: pytest

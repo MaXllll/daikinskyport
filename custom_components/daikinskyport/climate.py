@@ -40,6 +40,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from . import DaikinSkyportData
+from .climate_deneb import DaikinDenebClimate
+from .device_types import is_deneb_payload, is_oneplus_payload, log_skipped_device
 
 from .const import (
     _LOGGER,
@@ -222,6 +224,20 @@ SUPPORT_FLAGS = (
     | ClimateEntityFeature.TURN_OFF
 )
 
+def iter_oneplus_thermostats(client):
+    """Yield (index, thermostat) for devices with a One+ payload shape.
+
+    Devices with other payloads (e.g. Aurora ductless heads) are skipped
+    with a warning instead of crashing platform setup.
+    """
+    for index in range(len(client.thermostats)):
+        thermostat = client.get_thermostat(index)
+        if is_oneplus_payload(thermostat):
+            yield index, thermostat
+        elif not is_deneb_payload(thermostat):
+            log_skipped_device(thermostat, "climate")
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -231,10 +247,15 @@ async def async_setup_entry(
     coordinator: DaikinSkyportData = data[COORDINATOR]
     entities = []
 
+    for index, thermostat in iter_oneplus_thermostats(coordinator.daikinskyport):
+        entities.append(Thermostat(coordinator, index, thermostat))
+
+    # DENEB (Aurora ductless) heads get their own entity class.
     for index in range(len(coordinator.daikinskyport.thermostats)):
         thermostat = coordinator.daikinskyport.get_thermostat(index)
-        entities.append(Thermostat(coordinator, index, thermostat))
-    
+        if not is_oneplus_payload(thermostat) and is_deneb_payload(thermostat):
+            entities.append(DaikinDenebClimate(coordinator, index, thermostat))
+
     async_add_entities(entities, True)
 
     def resume_program_set_service(service: ServiceCall) -> None:

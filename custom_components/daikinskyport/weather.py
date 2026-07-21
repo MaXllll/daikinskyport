@@ -21,6 +21,7 @@ from homeassistant.const import (
 from homeassistant.util import dt as dt_util
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.device_registry import DeviceInfo
+from .device_types import log_skipped_device
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -43,6 +44,9 @@ async def async_setup_entry(
 
     for index in range(len(coordinator.daikinskyport.thermostats)):
         thermostat = coordinator.daikinskyport.get_thermostat(index)
+        if "timeZone" not in thermostat or "weatherTodayIcon" not in thermostat:
+            log_skipped_device(thermostat, "weather")
+            continue
         async_add_entities([DaikinSkyportWeather(coordinator, thermostat["name"], index)], True)
 
 class DaikinSkyportWeather(WeatherEntity):

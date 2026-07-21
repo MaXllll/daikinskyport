@@ -1,0 +1,4 @@
+# Test harness. The pinned version bundles a matching Home Assistant core.
+# CI also runs the latest harness to track current HA releases.
+pytest-homeassistant-custom-component==0.13.109
+requests-mock>=1.11

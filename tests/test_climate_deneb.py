@@ -1,0 +1,215 @@
+"""TDD spec for the DENEB (Aurora ductless) climate entity.
+
+Fixture = real captured payload from a live 4MXTH36AVJU9 + FTXV/CTXV
+system (state at capture: powered on,
+cool mode, target 23, room 22.0C / 60% RH).
+
+Verified facts encoded here (see project doc daikin-deneb-api-findings.md):
+- mode enum: 0=fan_only, 1=heat, 2=cool, 3=auto, 5=dry (4, 6 invalid)
+- power is iduOnOff (bool), separate from mode
+- setpoint per mode: iduHeatSetpoint / iduCoolSetpoint / iduAutoSetpoint
+- fan per mode: idu{Heat,Cool,Auto,Dry,FanMode}FanSpeed;
+  values 3..7 = speeds 1..5, 10 = auto, 11 = quiet
+- writes are direct field PUTs to /deviceData/{id}
+"""
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from homeassistant.components.climate import (
+    ClimateEntityFeature,
+    HVACAction,
+    HVACMode,
+)
+
+from tests.conftest import make_fake_coordinator
+
+
+@pytest.fixture
+def deneb_payload(request):
+    import json
+    from pathlib import Path
+
+    return json.loads(
+        (Path(__file__).parent / "fixtures" / "deneb_device_data.json").read_text()
+    )
+
+
+@pytest.fixture
+def deneb_entity(deneb_payload):
+    from custom_components.daikinskyport.climate_deneb import DaikinDenebClimate
+
+    client = MagicMock()
+    data = make_fake_coordinator(client)
+    entity = DaikinDenebClimate(data, 0, dict(deneb_payload))
+    return entity, client
+
+
+class TestStateMapping:
+    def test_identity_uses_friendly_adapter_name(self, deneb_entity):
+        entity, _ = deneb_entity
+        assert entity.unique_id == "dddddddd-0000-0000-0000-000000000004-climate"
+        assert entity.name == "Heatpump_Bedroom2"
+
+    def test_on_cool_maps_to_cool_mode(self, deneb_entity):
+        entity, _ = deneb_entity
+        # fixture: iduOnOff=True, iduOperatingMode=2
+        assert entity.hvac_mode == HVACMode.COOL
+
+    def test_target_follows_active_mode_setpoint(self, deneb_entity):
+        entity, _ = deneb_entity
+        # cool mode -> iduCoolSetpoint (23)
+        assert entity.target_temperature == 23
+
+    def test_current_temperature_and_humidity(self, deneb_entity):
+        entity, _ = deneb_entity
+        assert entity.current_temperature == 22
+        assert entity.current_humidity == 60
+
+    def test_fan_mode_auto(self, deneb_entity):
+        entity, _ = deneb_entity
+        # cool mode active, iduCoolFanSpeed=10 -> auto
+        assert entity.fan_mode == "auto"
+        assert set(entity.fan_modes) == {"auto", "quiet", "1", "2", "3", "4", "5"}
+
+    def test_hvac_action_idle_when_not_conditioning(self, deneb_entity):
+        entity, _ = deneb_entity
+        # fixture: iduThermoState=False while on -> idle
+        assert entity.hvac_action == HVACAction.IDLE
+
+    def test_all_supported_modes_exposed(self, deneb_entity):
+        entity, _ = deneb_entity
+        assert set(entity.hvac_modes) == {
+            HVACMode.OFF,
+            HVACMode.HEAT,
+            HVACMode.COOL,
+            HVACMode.AUTO,
+            HVACMode.DRY,
+            HVACMode.FAN_ONLY,
+        }
+
+    def test_supported_features(self, deneb_entity):
+        entity, _ = deneb_entity
+        assert entity.supported_features & ClimateEntityFeature.TARGET_TEMPERATURE
+        assert entity.supported_features & ClimateEntityFeature.FAN_MODE
+        assert entity.supported_features & ClimateEntityFeature.TURN_OFF
+        assert entity.supported_features & ClimateEntityFeature.TURN_ON
+
+    def test_off_state(self, deneb_payload):
+        from custom_components.daikinskyport.climate_deneb import DaikinDenebClimate
+
+        payload = dict(deneb_payload)
+        payload["iduOnOff"] = False
+        entity = DaikinDenebClimate(make_fake_coordinator(MagicMock()), 0, payload)
+        assert entity.hvac_mode == HVACMode.OFF
+        assert entity.hvac_action == HVACAction.OFF
+        # target still shown from last active mode so the card is useful
+        assert entity.target_temperature == 23
+
+
+class TestCommands:
+    def test_set_hvac_mode_off_powers_down(self, deneb_entity):
+        entity, client = deneb_entity
+        entity.set_hvac_mode(HVACMode.OFF)
+        client.set_deneb_power.assert_called_once_with(0, False)
+
+    def test_set_hvac_mode_heat_powers_on_with_mode(self, deneb_entity):
+        entity, client = deneb_entity
+        entity.set_hvac_mode(HVACMode.HEAT)
+        client.set_deneb_mode.assert_called_once_with(0, 1)
+
+    def test_set_hvac_mode_dry_and_fan_only(self, deneb_entity):
+        entity, client = deneb_entity
+        entity.set_hvac_mode(HVACMode.DRY)
+        client.set_deneb_mode.assert_called_with(0, 5)
+        entity.set_hvac_mode(HVACMode.FAN_ONLY)
+        client.set_deneb_mode.assert_called_with(0, 0)
+
+    def test_set_temperature_targets_active_mode_field(self, deneb_entity):
+        entity, client = deneb_entity
+        entity.set_temperature(temperature=24.5)
+        # active mode is cool -> write iduCoolSetpoint
+        client.set_deneb_setpoint.assert_called_once_with(0, "iduCoolSetpoint", 24.5)
+
+    def test_set_fan_mode_writes_active_mode_fan_field(self, deneb_entity):
+        entity, client = deneb_entity
+        entity.set_fan_mode("quiet")
+        client.set_deneb_fan.assert_called_once_with(0, "iduCoolFanSpeed", 11)
+        entity.set_fan_mode("3")
+        client.set_deneb_fan.assert_called_with(0, "iduCoolFanSpeed", 5)
+
+    def test_turn_on_off(self, deneb_entity):
+        entity, client = deneb_entity
+        entity.turn_off()
+        client.set_deneb_power.assert_called_with(0, False)
+        entity.turn_on()
+        client.set_deneb_power.assert_called_with(0, True)
+
+
+class TestClientDenebCommands:
+    """PUT bodies produced by the real client (mocked HTTP)."""
+
+    @pytest.fixture
+    def deneb_client(self, skyport_client, mock_skyport_api, deneb_payload):
+        from tests.conftest import API, DEVICES_URL
+        import json
+        from pathlib import Path
+
+        devices = json.loads(
+            (Path(__file__).parent / "fixtures" / "devices_deneb.json").read_text()
+        )
+        mock_skyport_api.get(DEVICES_URL, json=devices)
+        for dev in devices:
+            payload = {k: v for k, v in deneb_payload.items() if k not in ("id", "name", "model")}
+            mock_skyport_api.get(f"{API}/deviceData/{dev['id']}", json=payload)
+            mock_skyport_api.put(f"{API}/deviceData/{dev['id']}", json={"message": "Write sent"})
+        skyport_client.request_tokens()
+        skyport_client.update()
+        return skyport_client
+
+    def _last_put(self, mock_api):
+        return [c for c in mock_api.request_history if c.method == "PUT"][-1]
+
+    def test_set_deneb_power(self, deneb_client, mock_skyport_api):
+        deneb_client.set_deneb_power(0, True)
+        assert self._last_put(mock_skyport_api).json() == {"iduOnOff": True}
+
+    def test_set_deneb_mode_powers_on_and_sets_mode(self, deneb_client, mock_skyport_api):
+        deneb_client.set_deneb_mode(0, 1)
+        assert self._last_put(mock_skyport_api).json() == {
+            "iduOnOff": True,
+            "iduOperatingMode": 1,
+        }
+
+    def test_set_deneb_setpoint_rounds_to_half_degree(self, deneb_client, mock_skyport_api):
+        deneb_client.set_deneb_setpoint(0, "iduHeatSetpoint", 21.3)
+        assert self._last_put(mock_skyport_api).json() == {"iduHeatSetpoint": 21.5}
+
+    def test_set_deneb_fan(self, deneb_client, mock_skyport_api):
+        deneb_client.set_deneb_fan(0, "iduCoolFanSpeed", 11)
+        assert self._last_put(mock_skyport_api).json() == {"iduCoolFanSpeed": 11}
+
+    def test_deneb_get_sensors(self, deneb_client):
+        sensors = deneb_client.get_sensors(0)
+        by_key = {(s["name"], s["type"]): s["value"] for s in sensors}
+        assert by_key[("Heatpump_Bedroom2 Indoor", "temperature")] == 22
+        assert by_key[("Heatpump_Bedroom2 Indoor", "humidity")] == 60
+        assert by_key[("Heatpump_Bedroom2 Outdoor", "temperature")] == 21.5
+
+
+class TestRouting:
+    def test_deneb_model_classified_ductless(self):
+        from custom_components.daikinskyport.device_types import classify_model, DeviceType
+
+        assert classify_model("DENEB") is DeviceType.DUCTLESS
+
+    def test_deneb_payload_not_oneplus(self, deneb_payload):
+        from custom_components.daikinskyport.device_types import (
+            is_oneplus_payload,
+            is_deneb_payload,
+        )
+
+        assert is_oneplus_payload(deneb_payload) is False
+        assert is_deneb_payload(deneb_payload) is True
