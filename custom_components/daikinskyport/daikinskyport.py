@@ -431,6 +431,18 @@ class DaikinSkyport(object):
             self.thermostats[index][field] = temperature
         return result
 
+    def set_deneb_flag(self, index, field, state):
+        ''' Write a boolean feature flag on a DENEB head. Known-good fields
+        (present in live captures): iduWindNiceOperation (Comfort airflow),
+        iduEconoModeSetting (Econo), oduPowerfulOperationRequest (Powerful).
+        Local state is updated only after a confirmed write. '''
+        state = bool(state)
+        result = self.make_request(index, {field: state},
+                                   "set ductless feature flag")
+        if result is not None:
+            self.thermostats[index][field] = state
+        return result
+
     def set_deneb_fan(self, index, field, speed):
         ''' Write a per-mode fan-speed field on a DENEB head.
         Values: 3..7 = speeds 1..5, 10 = auto, 11 = quiet. '''
