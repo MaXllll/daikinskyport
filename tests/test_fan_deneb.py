@@ -1,16 +1,16 @@
-"""TDD spec for the DENEB (Aurora ductless) fan entity.
+"""TDD spec for the DENEB (Aurora ductless) fan entity — hybrid layout.
 
 One fan entity per head, designed for clean HomeKit bridging:
 
-- percentage slider = manual fan speeds 1..5 (device values 3..7),
-  speed_count 5 so HomeKit gets 20% steps. No more "0% means auto".
-- preset_modes = ["Auto", "Quiet", "Econo", "Powerful"]. In the HomeKit
-  bridge each preset renders as a labeled toggle inside the fan tile.
-- is_on mirrors head power (iduOnOff): the fan tile IS the head's fan.
-- Preset semantics are exclusive (matching the IR remote, where Powerful
-  overrides Econo): activating one clears the conflicting boosts.
-- HomeKit deactivates a preset by calling plain turn_on: on an already-on
-  head that clears Powerful, then Econo, then Quiet->Auto, else no-op.
+- Exactly ONE preset mode ("Auto"): with a single preset the HomeKit
+  bridge maps it to the native TargetFanState Auto/Manual selector
+  (clean Apple UI) instead of grouped anonymous switch toggles.
+- Slider = quiet + manual speeds 1..5 (speed_count 6). Bottom step is
+  Quiet (quieter = lower). Device values: 11=quiet, 3..7=speeds 1..5,
+  10=auto.
+- Econo/Powerful/Comfort are standalone switch entities, NOT fan
+  presets, so they bridge as properly-named accessories.
+- is_on mirrors head power (iduOnOff).
 
 Fan-speed fields are per-hvac-mode (DENEB_MODE_FAN_FIELD); the fixture is
 in cool mode (iduOperatingMode=2 -> iduCoolFanSpeed, value 10 = auto).
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -54,10 +54,13 @@ class TestState:
             ("daikinskyport", "dddddddd-0000-0000-0000-000000000004")
         }
 
-    def test_speed_count_and_presets(self, deneb_payload):
+    def test_single_auto_preset_for_native_homekit_selector(self, deneb_payload):
+        # CRITICAL: exactly one preset -> HomeKit native Auto/Manual.
+        # Adding more presets here regresses the Home app to grouped
+        # anonymous switch toggles.
         entity, _, _ = _make_fan(deneb_payload)
-        assert entity.speed_count == 5
-        assert entity.preset_modes == ["Auto", "Quiet", "Econo", "Powerful"]
+        assert entity.preset_modes == ["Auto"]
+        assert entity.speed_count == 6
 
     def test_is_on_mirrors_head_power(self, deneb_payload):
         entity, _, payload = _make_fan(deneb_payload)
@@ -65,34 +68,31 @@ class TestState:
         payload["iduOnOff"] = False
         assert entity.is_on is False
 
-    def test_preset_auto_from_fixture(self, deneb_payload):
-        # fixture: cool mode, iduCoolFanSpeed=10 (auto), no boosts
+    def test_auto_from_fixture(self, deneb_payload):
+        # fixture: cool mode, iduCoolFanSpeed=10 (auto)
         entity, _, _ = _make_fan(deneb_payload)
         assert entity.preset_mode == "Auto"
         assert entity.percentage == 0
 
-    def test_preset_quiet(self, deneb_payload):
+    def test_quiet_is_bottom_slider_step(self, deneb_payload):
         entity, _, payload = _make_fan(deneb_payload)
         payload["iduCoolFanSpeed"] = 11
-        assert entity.preset_mode == "Quiet"
-
-    def test_manual_speed_maps_to_percentage(self, deneb_payload):
-        entity, _, payload = _make_fan(deneb_payload)
-        payload["iduCoolFanSpeed"] = 5  # speed 3 of 5
         assert entity.preset_mode is None
-        assert entity.percentage == 60
+        assert entity.percentage == 16  # 100 // 6
 
-    def test_preset_priority_powerful_over_econo_over_fan(self, deneb_payload):
+    def test_manual_speeds_map_to_upper_steps(self, deneb_payload):
         entity, _, payload = _make_fan(deneb_payload)
-        payload["iduEconoModeSetting"] = True
-        assert entity.preset_mode == "Econo"
-        payload["oduPowerfulOperationRequest"] = True
-        assert entity.preset_mode == "Powerful"
+        payload["iduCoolFanSpeed"] = 3  # speed 1 -> step 2 of 6
+        assert entity.percentage == 33
+        payload["iduCoolFanSpeed"] = 7  # speed 5 -> step 6 of 6
+        assert entity.percentage == 100
+        assert entity.preset_mode is None
 
     def test_follows_active_mode_fan_field(self, deneb_payload):
         entity, _, payload = _make_fan(deneb_payload)
         payload["iduOperatingMode"] = 1  # heat -> iduHeatFanSpeed (11 = quiet)
-        assert entity.preset_mode == "Quiet"
+        assert entity.preset_mode is None
+        assert entity.percentage == 16
 
     def test_unavailable_when_device_offline(self, deneb_payload):
         entity, client, _ = _make_fan(deneb_payload)
@@ -107,38 +107,28 @@ class TestCommands:
         entity.turn_on()
         client.set_deneb_power.assert_called_once_with(0, True)
 
+    def test_plain_turn_on_when_already_on_is_noop(self, deneb_payload):
+        entity, client, _ = _make_fan(deneb_payload)
+        entity.turn_on()
+        client.set_deneb_power.assert_not_called()
+        client.set_deneb_fan.assert_not_called()
+
     def test_turn_off_powers_head_down(self, deneb_payload):
         entity, client, _ = _make_fan(deneb_payload)
         entity.turn_off()
         client.set_deneb_power.assert_called_once_with(0, False)
 
-    def test_plain_turn_on_clears_powerful_first(self, deneb_payload):
-        entity, client, payload = _make_fan(deneb_payload)
-        payload["oduPowerfulOperationRequest"] = True
-        payload["iduEconoModeSetting"] = True
-        entity.turn_on()
-        client.set_deneb_flag.assert_called_once_with(
-            0, "oduPowerfulOperationRequest", False
-        )
-
-    def test_plain_turn_on_clears_econo_when_no_powerful(self, deneb_payload):
-        entity, client, payload = _make_fan(deneb_payload)
-        payload["iduEconoModeSetting"] = True
-        entity.turn_on()
-        client.set_deneb_flag.assert_called_once_with(
-            0, "iduEconoModeSetting", False
-        )
-
-    def test_plain_turn_on_quiet_falls_back_to_auto(self, deneb_payload):
-        entity, client, payload = _make_fan(deneb_payload)
-        payload["iduCoolFanSpeed"] = 11
-        entity.turn_on()
-        client.set_deneb_fan.assert_called_once_with(0, "iduCoolFanSpeed", 10)
-
-    def test_set_percentage_writes_speed(self, deneb_payload):
+    def test_set_percentage_bottom_step_is_quiet(self, deneb_payload):
         entity, client, _ = _make_fan(deneb_payload)
-        entity.set_percentage(60)
-        client.set_deneb_fan.assert_called_once_with(0, "iduCoolFanSpeed", 5)
+        entity.set_percentage(16)
+        client.set_deneb_fan.assert_called_once_with(0, "iduCoolFanSpeed", 11)
+
+    def test_set_percentage_upper_steps_are_speeds(self, deneb_payload):
+        entity, client, _ = _make_fan(deneb_payload)
+        entity.set_percentage(33)  # step 2 -> speed 1
+        client.set_deneb_fan.assert_called_with(0, "iduCoolFanSpeed", 3)
+        entity.set_percentage(100)  # step 6 -> speed 5
+        client.set_deneb_fan.assert_called_with(0, "iduCoolFanSpeed", 7)
 
     def test_set_percentage_zero_turns_off(self, deneb_payload):
         entity, client, _ = _make_fan(deneb_payload)
@@ -146,44 +136,29 @@ class TestCommands:
         client.set_deneb_power.assert_called_once_with(0, False)
         client.set_deneb_fan.assert_not_called()
 
-    def test_preset_auto_clears_boosts_and_sets_auto(self, deneb_payload):
-        entity, client, payload = _make_fan(deneb_payload)
-        payload["iduEconoModeSetting"] = True
+    def test_preset_auto_sets_auto(self, deneb_payload):
+        entity, client, _ = _make_fan(deneb_payload)
         entity.set_preset_mode("Auto")
-        assert client.set_deneb_flag.call_args_list == [
-            call(0, "iduEconoModeSetting", False)
-        ]
         client.set_deneb_fan.assert_called_once_with(0, "iduCoolFanSpeed", 10)
 
-    def test_preset_quiet_sets_quiet(self, deneb_payload):
+    def test_turn_on_with_preset_routes_to_auto(self, deneb_payload):
+        # HomeKit TargetFanState=Auto arrives as turn_on(preset_mode="Auto")
         entity, client, _ = _make_fan(deneb_payload)
-        entity.set_preset_mode("Quiet")
-        client.set_deneb_fan.assert_called_once_with(0, "iduCoolFanSpeed", 11)
+        entity.turn_on(preset_mode="Auto")
+        client.set_deneb_fan.assert_called_once_with(0, "iduCoolFanSpeed", 10)
 
-    def test_preset_econo_turns_off_powerful_first(self, deneb_payload):
-        entity, client, payload = _make_fan(deneb_payload)
-        payload["oduPowerfulOperationRequest"] = True
-        entity.set_preset_mode("Econo")
-        assert client.set_deneb_flag.call_args_list == [
-            call(0, "oduPowerfulOperationRequest", False),
-            call(0, "iduEconoModeSetting", True),
-        ]
-
-    def test_preset_powerful_turns_off_econo_first(self, deneb_payload):
-        entity, client, payload = _make_fan(deneb_payload)
-        payload["iduEconoModeSetting"] = True
-        entity.set_preset_mode("Powerful")
-        assert client.set_deneb_flag.call_args_list == [
-            call(0, "iduEconoModeSetting", False),
-            call(0, "oduPowerfulOperationRequest", True),
-        ]
+    def test_turn_on_with_percentage_routes_to_speed(self, deneb_payload):
+        # HomeKit TargetFanState=Manual arrives as turn_on(percentage=...)
+        entity, client, _ = _make_fan(deneb_payload)
+        entity.turn_on(percentage=50)  # step 3 -> speed 2
+        client.set_deneb_fan.assert_called_once_with(0, "iduCoolFanSpeed", 4)
 
     def test_unknown_preset_rejected(self, deneb_payload):
         from homeassistant.exceptions import ServiceValidationError
 
         entity, _, _ = _make_fan(deneb_payload)
         with pytest.raises(ServiceValidationError):
-            entity.set_preset_mode("Turbo")
+            entity.set_preset_mode("Econo")
 
     def test_failed_command_raises(self, deneb_payload):
         entity, client, _ = _make_fan(deneb_payload)
