@@ -3,8 +3,11 @@
 Three boolean features per head, mirroring the IR remote's dedicated
 buttons. All three fields are present in live-captured deviceData:
 
-- Comfort airflow (``iduWindNiceOperation``): vane aims airflow away from
-  occupants (up in cooling, down in heating).
+- Comfort airflow: vane aims airflow away from occupants (up in
+  cooling, down in heating). Commanded via the ACTIVE mode's vane field
+  (idu{Mode}AirDirectionUpDown = 23 on / 0 off, verified live);
+  ``iduWindNiceOperation`` is only the read-only running-status flag and
+  rejects direct writes.
 - Econo (``iduEconoModeSetting``): caps compressor draw for lower
   consumption / breaker relief.
 - Powerful (``oduPowerfulOperationRequest``): 20-minute full-tilt boost.
@@ -22,7 +25,12 @@ from homeassistant.components.switch import SwitchEntity, SwitchEntityDescriptio
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 
-from .const import DOMAIN, MANUFACTURER
+from .const import (
+    DOMAIN,
+    MANUFACTURER,
+    DENEB_MODE_VANE_FIELD,
+    DENEB_VANE_COMFORT,
+)
 from .climate_deneb import _clean_name
 
 
@@ -37,6 +45,9 @@ DENEB_SWITCHES: tuple[DenebSwitchDescription, ...] = (
     DenebSwitchDescription(
         key="comfort",
         name="Comfort airflow",
+        # State/commands go through the active mode's vane field; this
+        # read-only status field is kept for the unique_id (stable) and
+        # surfaced as an attribute.
         field="iduWindNiceOperation",
         icon="mdi:weather-windy",
     ),
@@ -90,9 +101,28 @@ class DaikinDenebSwitch(SwitchEntity):
         except (IndexError, TypeError, AttributeError):
             return self._initial_thermostat
 
+    def _vane_field(self) -> str | None:
+        return DENEB_MODE_VANE_FIELD.get(self.thermostat.get("iduOperatingMode"))
+
     @property
     def is_on(self) -> bool:
+        if self.entity_description.key == "comfort":
+            field = self._vane_field()
+            return (
+                field is not None
+                and self.thermostat.get(field) == DENEB_VANE_COMFORT
+            )
         return bool(self.thermostat.get(self.entity_description.field))
+
+    @property
+    def extra_state_attributes(self):
+        if self.entity_description.key != "comfort":
+            return None
+        # Live status: true only while the head is running with the
+        # comfort vane engaged in the active mode.
+        return {
+            "comfort_active": bool(self.thermostat.get("iduWindNiceOperation"))
+        }
 
     @property
     def available(self) -> bool:
@@ -113,9 +143,14 @@ class DaikinDenebSwitch(SwitchEntity):
     # -------------------------------------------------------------- commands
 
     def _set(self, state: bool) -> None:
-        result = self.data.daikinskyport.set_deneb_flag(
-            self.thermostat_index, self.entity_description.field, state
-        )
+        if self.entity_description.key == "comfort":
+            result = self.data.daikinskyport.set_deneb_comfort(
+                self.thermostat_index, state
+            )
+        else:
+            result = self.data.daikinskyport.set_deneb_flag(
+                self.thermostat_index, self.entity_description.field, state
+            )
         if result is None:
             raise HomeAssistantError(
                 f"Daikin command failed ({self.entity_description.name} "

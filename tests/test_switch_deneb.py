@@ -3,7 +3,9 @@
 Three per-head boolean features, all present in the live-captured
 deviceData payload (tests/fixtures/deneb_device_data.json):
 
-- Comfort airflow : iduWindNiceOperation      (remote "Comfort" button)
+- Comfort airflow : active mode's vane field = 23 (on) / 0 (off);
+                    iduWindNiceOperation is read-only running status
+                    (direct writes rejected by the cloud - verified live)
 - Econo           : iduEconoModeSetting       (remote "Econo" button)
 - Powerful        : oduPowerfulOperationRequest (remote "Powerful" button)
 
@@ -70,12 +72,26 @@ class TestState:
         }
         assert entity.device_info["name"] == "Heatpump Bedroom2"
 
-    @pytest.mark.parametrize("key", ["comfort", "econo", "powerful"])
+    @pytest.mark.parametrize("key", ["econo", "powerful"])
     def test_is_on_reads_live_payload(self, deneb_payload, key):
         entity, _, payload = _make_switch(deneb_payload, key)
-        assert entity.is_on is False  # all three False in the fixture
+        assert entity.is_on is False  # both False in the fixture
         payload[entity.entity_description.field] = True
         assert entity.is_on is True
+
+    def test_comfort_is_on_reads_active_mode_vane(self, deneb_payload):
+        entity, _, payload = _make_switch(deneb_payload, "comfort")
+        assert entity.is_on is False  # fixture: cool mode, vane 0
+        payload["iduCoolAirDirectionUpDown"] = 23
+        assert entity.is_on is True
+        payload["iduOperatingMode"] = 1  # heat: its vane field is 0
+        assert entity.is_on is False
+
+    def test_comfort_exposes_running_status_attribute(self, deneb_payload):
+        entity, _, payload = _make_switch(deneb_payload, "comfort")
+        assert entity.extra_state_attributes == {"comfort_active": False}
+        payload["iduWindNiceOperation"] = True
+        assert entity.extra_state_attributes == {"comfort_active": True}
 
     def test_live_read_survives_client_dict_replacement(self, deneb_payload):
         entity, client, _ = _make_switch(deneb_payload, "econo")
@@ -92,7 +108,6 @@ class TestState:
 
 class TestCommands:
     @pytest.mark.parametrize("key,field", [
-        ("comfort", "iduWindNiceOperation"),
         ("econo", "iduEconoModeSetting"),
         ("powerful", "oduPowerfulOperationRequest"),
     ])
@@ -103,9 +118,17 @@ class TestCommands:
         entity.turn_off()
         client.set_deneb_flag.assert_called_with(0, field, False)
 
+    def test_comfort_turn_on_off_uses_comfort_setter(self, deneb_payload):
+        entity, client, _ = _make_switch(deneb_payload, "comfort")
+        entity.turn_on()
+        client.set_deneb_comfort.assert_called_with(0, True)
+        entity.turn_off()
+        client.set_deneb_comfort.assert_called_with(0, False)
+        client.set_deneb_flag.assert_not_called()
+
     def test_failed_command_raises(self, deneb_payload):
         entity, client, _ = _make_switch(deneb_payload, "comfort")
-        client.set_deneb_flag.return_value = None
+        client.set_deneb_comfort.return_value = None
         with pytest.raises(HomeAssistantError):
             entity.turn_on()
 
@@ -138,12 +161,34 @@ class TestClientFlagWrites:
     def test_set_deneb_flag_put_body_and_local_mutation(
         self, deneb_client, mock_skyport_api
     ):
-        result = deneb_client.set_deneb_flag(0, "iduWindNiceOperation", True)
+        result = deneb_client.set_deneb_flag(0, "iduEconoModeSetting", True)
         assert result is not None
         assert self._last_put(mock_skyport_api).json() == {
-            "iduWindNiceOperation": True
+            "iduEconoModeSetting": True
         }
-        assert deneb_client.thermostats[0]["iduWindNiceOperation"] is True
+        assert deneb_client.thermostats[0]["iduEconoModeSetting"] is True
+
+    def test_set_deneb_comfort_writes_active_mode_vane(
+        self, deneb_client, mock_skyport_api
+    ):
+        # fixture: cool mode -> iduCoolAirDirectionUpDown, 23 = comfort
+        result = deneb_client.set_deneb_comfort(0, True)
+        assert result is not None
+        assert self._last_put(mock_skyport_api).json() == {
+            "iduCoolAirDirectionUpDown": 23
+        }
+        assert deneb_client.thermostats[0]["iduCoolAirDirectionUpDown"] == 23
+        deneb_client.set_deneb_comfort(0, False)
+        assert self._last_put(mock_skyport_api).json() == {
+            "iduCoolAirDirectionUpDown": 0
+        }
+
+    def test_set_deneb_comfort_follows_mode(self, deneb_client, mock_skyport_api):
+        deneb_client.thermostats[0]["iduOperatingMode"] = 1  # heat
+        deneb_client.set_deneb_comfort(0, True)
+        assert self._last_put(mock_skyport_api).json() == {
+            "iduHeatAirDirectionUpDown": 23
+        }
 
     def test_set_deneb_flag_coerces_to_bool(self, deneb_client, mock_skyport_api):
         deneb_client.set_deneb_flag(0, "oduPowerfulOperationRequest", 1)

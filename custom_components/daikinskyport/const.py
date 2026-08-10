@@ -87,6 +87,22 @@ DENEB_MODE_FAN_FIELD = {
     DENEB_MODE_AUTO: "iduAutoFanSpeed",
     DENEB_MODE_DRY: "iduDryFanSpeed",
 }
+DENEB_MODE_VANE_FIELD = {
+    DENEB_MODE_FAN_ONLY: "iduFanAirDirectionUpDown",
+    DENEB_MODE_HEAT: "iduHeatAirDirectionUpDown",
+    DENEB_MODE_COOL: "iduCoolAirDirectionUpDown",
+    DENEB_MODE_AUTO: "iduAutoAirDirectionUpDown",
+    DENEB_MODE_DRY: "iduDryAirDirectionUpDown",
+}
+
+# Vane (air direction) values, physically verified: writing 23 to the
+# active mode's vane field engages "Comfort airflow" (the remote's
+# Comfort button) and iduWindNiceOperation flips true while running;
+# writing 0 restores the default vane and clears it. Direct writes to
+# iduWindNiceOperation itself are rejected by the cloud (read-only
+# status flag).
+DENEB_VANE_COMFORT = 23
+DENEB_VANE_DEFAULT = 0
 
 CONF_REFRESH_TOKEN = "refresh_token"
 CONF_ACCESS_TOKEN = "access_token"

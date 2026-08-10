@@ -10,7 +10,12 @@ from requests.exceptions import RequestException
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
-from .const import DAIKIN_PERCENT_MULTIPLIER
+from .const import (
+    DAIKIN_PERCENT_MULTIPLIER,
+    DENEB_MODE_VANE_FIELD,
+    DENEB_VANE_COMFORT,
+    DENEB_VANE_DEFAULT,
+)
 from .device_types import is_deneb_payload
 
 logger = logging.getLogger('daikinskyport')
@@ -441,6 +446,24 @@ class DaikinSkyport(object):
                                    "set ductless feature flag")
         if result is not None:
             self.thermostats[index][field] = state
+        return result
+
+    def set_deneb_comfort(self, index, state):
+        ''' Engage/clear Comfort airflow on a DENEB head.
+        The remote's Comfort button maps to the ACTIVE mode's vane field
+        (idu{Mode}AirDirectionUpDown): 23 = comfort airflow, 0 = default.
+        iduWindNiceOperation is a read-only status flag (direct writes
+        are rejected by the cloud); it flips true while the head runs
+        with the comfort vane engaged. Verified live both directions. '''
+        mode = self.thermostats[index].get("iduOperatingMode")
+        field = DENEB_MODE_VANE_FIELD.get(mode)
+        if field is None:
+            return None
+        value = DENEB_VANE_COMFORT if state else DENEB_VANE_DEFAULT
+        result = self.make_request(index, {field: value},
+                                   "set ductless comfort airflow")
+        if result is not None:
+            self.thermostats[index][field] = value
         return result
 
     def set_deneb_fan(self, index, field, speed):
